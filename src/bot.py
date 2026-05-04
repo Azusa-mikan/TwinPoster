@@ -19,6 +19,8 @@ UserData = dict[Any, Any]
 Context = CallbackContext[ExtBot[None], UserData, ChatData, BotData]
 App = Application[ExtBot[None], Context, UserData, ChatData, BotData, JobQueue[Context]]
 
+message_map: dict[int, Message] = {}
+
 class TGbot:
     def __init__(self) -> None:
         self.bot = self._init_bot(cfg.token)
@@ -74,32 +76,11 @@ class TGbot:
         
         await message.delete()
 
-
-    async def send_to_public_channel(self, query: CallbackQuery, chat_data: ChatData):
-        await query.answer()
-        msg: Message | None = chat_data.get("push_msg")
-        if msg is None:
-            await query.edit_message_text(
-                "发生错误:\n数据缺失，请手动转发"
-            )
-            return
-        try:
-            message = await msg.copy(chat_id=cfg.to_public_channel)
-        except Exception as e:
-            await query.edit_message_text(
-                f"发生错误:\n{e}\n请手动转发"
-            )
-            return
-        return message.message_id
-
     async def channel_message_handler(self, update: Update, context: Context) -> None:
         if (msg := update.message) is None:
             return
         
         if not msg.is_automatic_forward:
-            return
-        
-        if (chat_data := context.chat_data) is None:
             return
 
         markup = InlineKeyboardMarkup([
@@ -109,12 +90,11 @@ class TGbot:
             ]
         ])
 
-        chat_data["push_msg"] = msg
-
-        await msg.reply_text(
+        message = await msg.reply_text(
             "是否发布到公开频道？",
             reply_markup=markup,
         )
+        message_map[message.id] = msg
 
     async def on_callback(self, update: Update, context: Context):
         """
@@ -125,8 +105,8 @@ class TGbot:
         if query.from_user.id != cfg.admin_id:
             await query.answer("你没有权限进行此操作", show_alert=True)
             return
-        if (chat_data := context.chat_data) is None:
-            await query.answer("数据缺失或错误", show_alert=True)
+        if (message := query.message) is None:
+            await query.answer("没有有效消息载体", show_alert=True)
             return
 
         operation = query.data or ""
@@ -134,21 +114,39 @@ class TGbot:
         match operation:
             case "action:cancel":
                 await query.answer()
+                message_map.pop(message.message_id, None)
                 await query.delete_message()
                 return
             case "action:push":
-                msgid = await self.send_to_public_channel(
-                    query,chat_data
-                )
-                if msgid is None:
+                await query.answer()
+                if (msg := message_map.get(message.message_id)) is None:
+                    await query.edit_message_text(
+                        "数据缺失或错误\n请手动转发"
+                    )
                     return
+
+                try:
+                    messageid = await msg.copy(
+                        chat_id=cfg.to_public_channel
+                    )
+                except Exception as e:
+                    await query.edit_message_text(
+                        f"发生错误:\n{e}\n请手动转发"
+                    )
+                    return
+                finally:
+                    message_map.pop(message.message_id, None)
                 
                 await query.edit_message_text(
                     f"此消息已发布",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton(
                             "查看",
-                            url=f"https://t.me/{self.public_channel_username}/{msgid}"
+                            url=(
+                                "https://t.me/"
+                                f"{self.public_channel_username}/"
+                                f"{messageid.message_id}"
+                            )
                         )]
                     ])
                 )
